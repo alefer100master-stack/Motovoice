@@ -1,0 +1,147 @@
+
+name: MotoVoice Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build MotoVoice APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Extract MotoVoice ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ZIP="MotoVoice-GitHub.zip"
+
+          if [ ! -f "$ZIP" ]; then
+            echo "::error::MotoVoice ZIP not found"
+            exit 1
+          fi
+
+          mkdir -p android-project
+          unzip -q -o "$ZIP" -d android-project
+
+          echo "ZIP extracted successfully"
+
+      - name: Locate Android project
+        id: locate
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PROJECT=""
+
+          while IFS= read -r file; do
+            dir=$(dirname "$file")
+
+            if [ -f "$dir/app/build.gradle.kts" ] || \
+               [ -f "$dir/app/build.gradle" ]; then
+              PROJECT="$dir"
+              break
+            fi
+          done < <(find android-project -maxdepth 6 -type f \
+            \( -name settings.gradle.kts -o -name settings.gradle \))
+
+          if [ -z "$PROJECT" ]; then
+            echo "::error::Android project not found inside ZIP"
+            exit 1
+          fi
+
+          echo "Project found: $PROJECT"
+          echo "project=$PROJECT" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+
+      - name: Install Android SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+
+          if [ ! -x "$SDKMANAGER" ]; then
+            echo "::error::Android SDK manager not found"
+            exit 1
+          fi
+
+          set +o pipefail
+          yes | "$SDKMANAGER" --licenses > /dev/null
+          set -o pipefail
+
+          "$SDKMANAGER" --install \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0"
+
+      - name: Validate Android project
+        shell: bash
+        env:
+          PROJECT: ${{ steps.locate.outputs.project }}
+        run: |
+          set -euo pipefail
+
+          test -f "$PROJECT/app/src/main/AndroidManifest.xml"
+
+          if [ ! -f "$PROJECT/build.gradle.kts" ] && \
+             [ ! -f "$PROJECT/build.gradle" ]; then
+            echo "::error::Root Gradle build file not found"
+            exit 1
+          fi
+
+          echo "Project structure verified"
+
+      - name: Build MotoVoice APK
+        shell: bash
+        working-directory: ${{ steps.locate.outputs.project }}
+        run: |
+          set -euo pipefail
+          gradle --no-daemon --stacktrace :app:assembleDebug
+
+      - name: Verify APK
+        shell: bash
+        env:
+          PROJECT: ${{ steps.locate.outputs.project }}
+        run: |
+          set -euo pipefail
+
+          APK="$PROJECT/app/build/outputs/apk/debug/app-debug.apk"
+
+          if [ ! -s "$APK" ]; then
+            echo "::error::APK was not generated"
+            exit 1
+          fi
+
+          echo "APK generated successfully"
+          ls -lh "$APK"
+
+      - name: Upload MotoVoice APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: MotoVoice-APK
+          path: ${{ steps.locate.outputs.project }}/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 30
